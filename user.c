@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 
 #define DEVICE_PATH "/dev/ReadProcessVAs"
 #define MAGIC 'x'
@@ -12,7 +13,7 @@
 #define EMPTY_LIST _IOR(MAGIC, 2, int)
 #define INIT_SEARCH _IOR(MAGIC, 3, struct search_struct *)
 #define SEARCH_CONT _IOR(MAGIC, 4, struct search_struct *)
-#define COMMAND5 _IOR(MAGIC, 5, struct search_struct *)
+#define WRITE_LIST _IOR(MAGIC, 5, struct search_struct *)
 #define BYTE 8;
 
 
@@ -42,7 +43,8 @@ typedef struct instructionPkg{
 
 typedef struct search_struct{
     char processName[256];
-    int value;
+    char string[256];
+    void* value;
     int size;
     char type;
     int callerPid;
@@ -69,7 +71,11 @@ void ProgressBar(long start , long end , long current , char* msg){
     }
 }
 
-
+void handle_sig(int sig){
+    system("clear");
+    int pid = getpid();
+    exit(0);
+}
 
 
 void emptyList(){
@@ -166,7 +172,7 @@ int writeProcessMemory(char* targetPname , unsigned long targetVAddr ,int size ,
 
 
 
-int Kernel_Init_search(char* name , int value){
+int Kernel_Init_search(char* name , void* value , char type){
     search_struct sr;
     int deviceFile = open(DEVICE_PATH, O_RDWR);
     if (deviceFile < 0) {
@@ -174,12 +180,36 @@ int Kernel_Init_search(char* name , int value){
         return 0;
     }
 
+
+    switch(type){
+
+        case 'i':
+        memcpy(&sr.value , value , sizeof(int));
+        sr.type = 'i';
+        sr.size = sizeof(int);
+        break;
+
+        case 'l':
+        memcpy(&sr.value , value , sizeof(long));
+        sr.type = 'l';
+        sr.size = sizeof(long);
+        break;
+
+        case 's':
+        sr.size = strlen((char*)value) + 1;
+        sr.value = malloc(sr.size);
+        sr.string[sr.size-1] = '\0';
+        strcpy(sr.string , value);
+        sr.type = 's';
+        break;
+
+    }
+
     sr.callerPid = getpid();
-    sr.value = value;
-    sr.type = 'i';
+   
     strncpy(sr.processName, name, sizeof(sr.processName) - 1);
     sr.processName[sizeof(sr.processName) - 1] = '\0';
-    sr.size = sizeof(int);
+
     
     if (ioctl(deviceFile, INIT_SEARCH, &sr) == -1) {
         printf("ERROR\n");
@@ -200,7 +230,7 @@ int Kernel_Init_search(char* name , int value){
 
 }
 
-int Kernel_Cont_search(char* name , int value){
+int Kernel_Cont_search(char* name , void* value, char type){
     search_struct sr;
     int deviceFile = open(DEVICE_PATH, O_RDWR);
     if (deviceFile < 0) {
@@ -208,12 +238,35 @@ int Kernel_Cont_search(char* name , int value){
         return 0;
     }
 
+    switch(type){
+
+        case 'i':
+        memcpy(&sr.value , value , sizeof(int));
+        sr.type = 'i';
+        sr.size = sizeof(int);
+        break;
+
+        case 'l':
+        memcpy(&sr.value , value , sizeof(long));
+        sr.type = 'l';
+        sr.size = sizeof(long);
+        break;
+
+        case 's':
+        sr.size = strlen((char*)value) + 1;
+        sr.value = malloc(sr.size);
+        sr.string[sr.size-1] = '\0';
+        strcpy(sr.string , value);
+        sr.type = 's';
+        break;
+
+    }
+
     sr.callerPid = getpid();
-    sr.value = value;
-    sr.type = 'i';
+    
     strncpy(sr.processName, name, sizeof(sr.processName) - 1);
     sr.processName[sizeof(sr.processName) - 1] = '\0';
-    sr.size = sizeof(int);
+    
 
 
     if (ioctl(deviceFile, SEARCH_CONT, &sr) == -1) {
@@ -233,12 +286,34 @@ int Kernel_Cont_search(char* name , int value){
     }
 }
 
-int writeKernelList(char* name , int value){
+int writeKernelList(char* name , void* value, char type){
     search_struct sr;
     strncpy(sr.processName, name, sizeof(sr.processName) - 1);
     sr.processName[sizeof(sr.processName) - 1] = '\0';
-    sr.value = value;
-    sr.size = sizeof(int);
+
+    switch(type){
+
+        case 'i':
+        memcpy(&sr.value , value , sizeof(int));
+        sr.type = 'i';
+        sr.size = sizeof(int);
+        break;
+
+        case 'l':
+        memcpy(&sr.value , value , sizeof(long));
+        sr.type = 'l';
+        sr.size = sizeof(long);
+        break;
+
+        case 's':
+        sr.size = strlen((char*)value) + 1;
+        sr.value = malloc(sr.size);
+        sr.string[sr.size-1] = '\0';
+        strcpy(sr.string , value);
+        sr.type = 's';
+        break;
+
+    }
 
     int deviceFile = open(DEVICE_PATH, O_RDWR);
     if (deviceFile < 0) {
@@ -246,7 +321,7 @@ int writeKernelList(char* name , int value){
         return 0;
     }
 
-    if (ioctl(deviceFile, COMMAND5, &sr) == -1) {
+    if (ioctl(deviceFile, WRITE_LIST, &sr) == -1) {
         printf("ERROR\n");
         close(deviceFile);
         return 0;
@@ -262,15 +337,23 @@ int writeKernelList(char* name , int value){
         return 0;
     }
 }
-enum state {CLEAR , INIT_SR , CONT_SR , WRITE_LIST , DEFAULT};
+enum state {CLEAR , INIT_SR , CONT_SR , WRITE_LIST_ALL , DEFAULT};
 
 void menu(){
+    signal(SIGINT, handle_sig); 
     enum state State = DEFAULT;
-    int input;
+
+    char type = 'x';
+    int menuSelection;
+    int inputInt;
+    long inputLong;
+    char inputString[256];
+    char processName[256];
+
     system("clear");
     printf("Enter process name to attach\n\n");
-    char processName[256];
     scanf("%s",processName);
+
     while(1){
         system("clear");
         switch(State){
@@ -281,50 +364,66 @@ void menu(){
             break;
 
             case INIT_SR:
-                printf("-----------------------------------------\n\n");
-                printf("Enter value to search\n\n");
-                printf("-----------------------------------------\n");
-
-                scanf("%i",&input);
-                Kernel_Init_search(processName, input);
+                printf("------------------------------------------------------\n\n");
+                printf("        Enter type and value to search\n");
+                printf("        sytax: (type) (value)\n");
+                printf("        types: i (int), l (long), s (string)\n\n");
+                printf("------------------------------------------------------\n");
+                scanf(" %c",&type);
+                switch(type){
+                    case 'i':scanf(" %i",&inputInt);Kernel_Init_search(processName, &inputInt , type);break;
+                    case 'l':scanf(" %ld",&inputLong);Kernel_Init_search(processName, &inputLong , type);break;
+                    case 's':scanf(" %s",inputString);Kernel_Init_search(processName, &inputString , type);break;
+                }
+                
                 State = DEFAULT;
             break;
 
             case CONT_SR:
-                printf("-----------------------------------------\n\n");
-                printf("Enter value to search\n\n");
-                printf("-----------------------------------------\n");
+                printf("------------------------------------------------------\n\n");
+                printf("        Enter value to search\n\n");
+                printf("------------------------------------------------------\n");
 
-                scanf("%i",&input);
-                Kernel_Cont_search(processName,input);
+                switch(type){
+                    case 'i':scanf(" %i",&inputInt);Kernel_Cont_search(processName, &inputInt , type);break;
+                    case 'l':scanf(" %ld",&inputLong);Kernel_Cont_search(processName, &inputLong , type);break;
+                    case 's':scanf(" %s",inputString);Kernel_Cont_search(processName, &inputString , type);break;
+                }
+
                 State = DEFAULT;
             break;
 
-            case WRITE_LIST:
-                printf("-----------------------------------------\n\n");
-                printf("Enter value to Write\n\n");
-                printf("-----------------------------------------\n");
+            case WRITE_LIST_ALL:
+                printf("------------------------------------------------------\n\n");
+                printf("        Enter value to Write\n\n");
+                printf("------------------------------------------------------\n");
 
-                int datatowrite;
-                scanf("%i",&datatowrite);
-                writeKernelList(processName, datatowrite);
+                switch(type){
+                    case 'i':scanf(" %i",&inputInt);writeKernelList(processName, &inputInt , type);break;
+                    case 'l':scanf(" %ld",&inputLong);writeKernelList(processName, &inputLong , type);break;
+                    case 's':scanf(" %s",inputString);writeKernelList(processName, &inputString , type);break;
+                }
+
                 State = DEFAULT;
             break;
 
             case DEFAULT:
-                printf("-----------------------------------------\n");
-                printf("Select option\n");
-                printf("1. Clear kernel list\n");
-                printf("2. Initialise kernel search\n");
-                printf("3. Continue kernel search\n");
-                printf("4. Write the addresses in the kernel list\n");
-                printf("-----------------------------------------\n");
-                while(!(scanf("%i",&input) == 1 && input>0 && input <5));
-                switch(input){
+                printf("------------------------------------------------------\n\n");
+                printf("           Selected type : %c\n",type);
+                printf("            Select option\n\n");
+                printf("    1. Clear kernel list\n");
+                printf("    2. Initialise kernel search\n");
+                printf("    3. Continue kernel search\n");
+                printf("    4. Write the addresses in the kernel list\n\n");
+                printf("------------------------------------------------------\n");
+                while(!(scanf("%i",&menuSelection) == 1 && menuSelection>0 && menuSelection <5));
+                switch(menuSelection){
                     case 1: State = CLEAR; break;
                     case 2: State = INIT_SR; break;
-                    case 3: State = CONT_SR; break;
-                    case 4: State = WRITE_LIST; break;
+                    case 3: if(type == 'i' || type == 'l' || type == 's')State = CONT_SR;
+                        break;
+                    case 4: if(type == 'i' || type == 'l' || type == 's')State = WRITE_LIST_ALL;
+                        break;
                 }
             break;
         }

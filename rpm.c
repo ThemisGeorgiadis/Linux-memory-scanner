@@ -10,9 +10,7 @@
 #include <linux/atomic.h>
 #include <linux/cdev.h>
 #include <linux/init.h>
-
-//sudo gdb -p <pid>
-//x/10x $rsp
+#include <linux/string.h>
 
 
 #define DEVICE_NAME "ReadProcessVAs"
@@ -21,7 +19,7 @@
 #define EMPTY_LIST _IOR(MAGIC, 2, int)
 #define INIT_SEARCH _IOR(MAGIC, 3, struct search_struct *)
 #define SEARCH_CONT _IOR(MAGIC, 4, struct search_struct *)
-#define COMMAND5 _IOR(MAGIC, 5, struct search_struct *)
+#define WRITE_LIST _IOR(MAGIC, 5, struct search_struct *)
 #define BYTE 8
 
 
@@ -37,7 +35,8 @@ typedef struct list{
 
 typedef struct search_struct{
     char processName[256];
-    int value;
+    char string[256];
+    void* value;
     int size;
     char type;
     int callerPid;
@@ -133,14 +132,10 @@ list* removefromlist(list** root, unsigned long addr) {
     for_each_process(CurrentTask){
         get_task_comm(buffer ,CurrentTask );
 
-        if(strcmp(buffer , Pname) == 0){
-            //printk(KERN_INFO "Process Found! PID:%i\n",CurrentTask->pid);
-            return CurrentTask;
-            
-        }
+        if(strcmp(buffer , Pname) == 0)return CurrentTask;
 
     }
-    printk(KERN_ERR "Process NOT Found!\n");
+    printk(KERN_ERR "PROCESS NOT FOUND\n");
     return NULL;
 }
 
@@ -149,15 +144,10 @@ static struct task_struct *getProcessByPid(int pid){
     struct task_struct *CurrentTask;
     for_each_process(CurrentTask){
         
-
-        if(CurrentTask->pid == pid){
-            //printk(KERN_INFO "Process Found! PID:%i\n",CurrentTask->pid);
-            return CurrentTask;
-            
-        }
-
+        if(CurrentTask->pid == pid)return CurrentTask;
+           
     }
-    printk(KERN_ERR "Process NOT Found!\n");
+    printk(KERN_ERR "PROCESS NOT FOUND\n");
     return NULL;
 }
 
@@ -190,9 +180,13 @@ void* read_process_memory(struct task_struct* task , unsigned long addr , int si
 
 }
 
-void searchWholeAddressSpaceInit(search_struct *v){
+void searchWholeAddressSpaceInit(search_struct *sr){
 
-    struct task_struct *task = getProcessByName(v->processName);
+    struct task_struct *task = getProcessByName(sr->processName);
+    if(!task){
+        printk(KERN_ERR "PROCESS NOT FOUND\n");
+        return;
+    }
 
     unsigned long addr;
     unsigned long start;
@@ -220,36 +214,59 @@ void searchWholeAddressSpaceInit(search_struct *v){
             value = read_process_memory(task,addr,PAGE_SIZE);
             //printk(KERN_INFO "ADDRESS %lx\n",addr);
 
-            for(unsigned long i=0; i<PAGE_SIZE-(v->size); i++){
+            for(unsigned long i=0; i<PAGE_SIZE-(sr->size); i++){
 
                 //printk(KERN_INFO "Address %lx , Value %i\n",addr+i, *((int*)(value+i)));
-                switch (v->type)
+                switch (sr->type)
                 {
                 case 'i':
 
-                    if(*((int*)(value+i)) == v->value){
+                    if(*((int*)(value+i)) == (int)sr->value){
+                                u++;
                         addr_struct *TA = kmalloc(sizeof(addr_struct),GFP_KERNEL);
                         TA->address = addr+i;
-                        TA->value = kmalloc(v->size , GFP_KERNEL);
+                        TA->value = kmalloc(sr->size , GFP_KERNEL);
                         *((int*)(TA->value)) = value+i;
                         addtolist(&MainListRoot,TA);
                         printk(KERN_INFO "Address %lx , Value int %i   %ld\n",addr+i, *((int*)(value+i)) , u);
-                        u++;
+                        
                     }
                     break;
                 case 'l':
                 
-                    if(*((long*)(value+i)) == v->value){
+                    if(*((long*)(value+i)) == (long)sr->value){
+                        u++;
                         addr_struct *TA = kmalloc(sizeof(addr_struct),GFP_KERNEL);
                         TA->address = addr+i;
-                        TA->value = kmalloc(v->size , GFP_KERNEL);
+                        TA->value = kmalloc(sr->size , GFP_KERNEL);
                         *((long*)(TA->value)) = value+i;
                         addtolist(&MainListRoot,TA);
-                        printk(KERN_INFO "Address %lx , Value long %i   %ld\n",addr+i, *((long*)(value+i)) , u);
-                        u++;
+                        printk(KERN_INFO "Address %lx , Value long %ld   %ld\n",addr+i, *((long*)(value+i)) , u);
+                        
                     }
                     break;
                 
+                case 's':
+                    if(*((char*)(value+i))){
+                        if(strncmp(sr->string , ((char*)(value+i)) , sr->size-1)==0){
+                            u++;
+                            char tmpChar[256];
+                            strncpy(tmpChar,((char*)(value+i)),sr->size-1);
+                            tmpChar[sr->size] = '\0';
+                            printk(KERN_INFO "Address %lx , Value string %s   %ld\n", addr+i, tmpChar ,u);
+
+                            addr_struct *TA = kmalloc(sizeof(addr_struct),GFP_KERNEL);
+                            TA->address = addr+i;
+                            TA->value = kmalloc(sr->size , GFP_KERNEL);
+                            strcpy((char*)(TA->value) , tmpChar);
+                            addtolist(&MainListRoot,TA);
+
+                            
+                        }
+                    }
+
+                break;
+
                 default:
                     break;
                 }
@@ -263,35 +280,56 @@ void searchWholeAddressSpaceInit(search_struct *v){
         if(addr < end){
             value = read_process_memory(task,addr,end-addr);
             
-            for(unsigned long i=0; i<(end-addr)-(v->size); i++){
+            for(unsigned long i=0; i<(end-addr)-(sr->size); i++){
                 //printk(KERN_INFO "Address %lx , Value %i\n",addr+i, *((int*)(value+i)));
 
-                switch (v->type)
+                switch (sr->type)
                 {
                 case 'i':
 
-                    if(*((int*)(value+i)) == v->value){
+                    if(*((int*)(value+i)) == (int)sr->value){
+                        u++;
                         addr_struct *TA = kmalloc(sizeof(addr_struct),GFP_KERNEL);
                         TA->address = addr+i;
-                        TA->value = kmalloc(v->size , GFP_KERNEL);
+                        TA->value = kmalloc(sr->size , GFP_KERNEL);
                         *((int*)(TA->value)) = value+i;
                         addtolist(&MainListRoot,TA);
                         printk(KERN_INFO "Address %lx , Value int %i   %ld\n",addr+i, *((int*)(value+i)) , u);
-                        u++;
+                        
                     }
                     break;
                 case 'l':
                 
-                    if(*((long*)(value+i)) == v->value){
+                    if(*((long*)(value+i)) == (long)sr->value){
+                        u++;
                         addr_struct *TA = kmalloc(sizeof(addr_struct),GFP_KERNEL);
                         TA->address = addr+i;
-                        TA->value = kmalloc(v->size , GFP_KERNEL);
+                        TA->value = kmalloc(sr->size , GFP_KERNEL);
                         *((long*)(TA->value)) = value+i;
                         addtolist(&MainListRoot,TA);
                         printk(KERN_INFO "Address %lx , Value long %i   %ld\n",addr+i, *((long*)(value+i)) , u);
-                        u++;
+                        
                     }
                     break;
+
+                case 's':
+                    if(*((char*)(value+i))){
+                        if(strncmp(sr->string , ((char*)(value+i)) , sr->size-1)==0){
+                            u++;
+                            char tmpChar[256];
+                            strncpy(tmpChar,((char*)(value+i)),sr->size-1);
+                            tmpChar[sr->size] = '\0';
+                            printk(KERN_INFO "Address %lx , Value string %s   %ld\n", addr+i, tmpChar ,u);
+
+                            addr_struct *TA = kmalloc(sizeof(addr_struct),GFP_KERNEL);
+                            TA->address = addr+i;
+                            TA->value = kmalloc(sr->size , GFP_KERNEL);
+                            strcpy((char*)(TA->value) , tmpChar);
+                            addtolist(&MainListRoot,TA);
+                        }
+                    }
+
+                break;
                 
                 default:
                     break;
@@ -307,26 +345,63 @@ void searchWholeAddressSpaceInit(search_struct *v){
 
 }
 
-void searchList(search_struct *v){
-    struct task_struct *task = getProcessByName(v->processName);
+void searchList(search_struct *sr){
+    struct task_struct *task = getProcessByName(sr->processName);
     list* curr = MainListRoot;
     list* tmpC = NULL;
     long u = 0;
     void* value;
-
+    if(!task){
+        printk(KERN_ERR "PROCESS NOT FOUND\n");
+        return;
+    }
 
     while(curr){
 
-        value = read_process_memory(task , curr->add_str->address , v->size);
+        value = read_process_memory(task , curr->add_str->address , sr->size);
 
-        if(*((int*)value) != v->value){
-            tmpC = curr->next;
-            removefromlist(&MainListRoot , curr->add_str->address);
-        }else{
-            u++;
-            printk(KERN_INFO "Address %lx , Value int %i   %ld\n",curr->add_str->address, *((int*)(value)) , u);
-            tmpC = curr->next;
+        switch(sr->type){
+
+            case 'i':
+                if(*((int*)value) != (int)sr->value){
+                    tmpC = curr->next;
+                    removefromlist(&MainListRoot , curr->add_str->address);
+                }else{
+                    u++;
+                    printk(KERN_INFO "Address %lx , Value int %i   %ld\n",curr->add_str->address, *((int*)(value)) , u);
+                    tmpC = curr->next;
+                }
+            break;
+
+            case 'l':
+                if(*((long*)value) != (long)sr->value){
+                    tmpC = curr->next;
+                    removefromlist(&MainListRoot , curr->add_str->address);
+                }else{
+                    u++;
+                    printk(KERN_INFO "Address %lx , Value int %i   %ld\n",curr->add_str->address, *((int*)(value)) , u);
+                    tmpC = curr->next;
+                }
+            break;
+
+            case 's':
+                char tmpChar[256];
+                strncpy(tmpChar,(char*)value,sr->size-1);
+                tmpChar[sr->size]='\0';
+                if(!(strcmp(sr->string,tmpChar)==0)){
+                    tmpC = curr->next;
+                    removefromlist(&MainListRoot , curr->add_str->address);
+                }else{
+                    u++;
+                    printk(KERN_INFO "Address %lx , Value string %s   %ld\n",curr->add_str->address, tmpChar, u);
+                    tmpC = curr->next;
+                }
+            break;
+
+
         }
+
+
         curr = tmpC;
     }
 }
@@ -334,10 +409,24 @@ void searchList(search_struct *v){
 void writeWholeList(search_struct* sr){
     list* tmpList = MainListRoot;
     struct task_struct *task = getProcessByName(sr->processName);
-
+    if(!task){
+        printk(KERN_ERR "PROCESS NOT FOUND\n");
+        return;
+    }
     while(tmpList){
         printk(KERN_INFO "WRITING ADDR %lx" , tmpList->add_str->address);
-        write_to_process_memory(task, tmpList->add_str->address, &sr->value, sr->size);
+        
+        switch(sr->type){
+            case 'i':
+            write_to_process_memory(task, tmpList->add_str->address, &sr->value, sr->size);
+            break;
+            case 'l':
+            write_to_process_memory(task, tmpList->add_str->address, &sr->value, sr->size);
+            break;
+            case 's':
+            write_to_process_memory(task, tmpList->add_str->address, sr->string, sr->size);
+            break;
+        }
         tmpList = tmpList->next;
     }
 }
@@ -347,9 +436,10 @@ static long executeInstruction(struct file *file, unsigned int cmd, unsigned lon
     instructionPkg curInst;
     
     search_struct sr;
+    sr.value = kmalloc(256 , GFP_KERNEL);
     int flag = 1;
 
-    if(cmd == COMMAND5){
+    if(cmd == WRITE_LIST){
         if (copy_from_user(&sr, (search_struct __user *)arg, sizeof(search_struct))) {
             printk(KERN_ERR "ERROR copying instructions from user!\n");
             return -EFAULT;
@@ -505,6 +595,8 @@ static int __init M_init(void) {
 }
 
 static void __exit M_exit(void) {
+
+    emptylist(&MainListRoot);
 
     device_destroy(cls, MKDEV(major, 0)); 
     class_destroy(cls); 
