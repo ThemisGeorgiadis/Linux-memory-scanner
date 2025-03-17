@@ -20,6 +20,7 @@
 #define INIT_SEARCH _IOR(MAGIC, 3, struct search_struct *)
 #define SEARCH_CONT _IOR(MAGIC, 4, struct search_struct *)
 #define WRITE_LIST _IOR(MAGIC, 5, struct search_struct *)
+#define TRANSFER _IOR(MAGIC, 6, struct list_transfer_struct *)
 #define BYTE 8
 
 
@@ -27,6 +28,11 @@ typedef struct addr_struct{
     unsigned long address;
     void* value;
 }addr_struct;
+
+typedef struct list_transfer_struct{
+    int transfersLeft , listLenght , currentTransfers;
+    addr_struct* add_str;
+}list_transfer_struct;
 
 typedef struct list{
     addr_struct *add_str;
@@ -61,6 +67,7 @@ typedef struct instructionPkg{
 
 int major;
 list *MainListRoot;
+int listLenght;
 
 
 void emptylist(list** root){
@@ -81,6 +88,7 @@ void emptylist(list** root){
         curr = tmpNext;
     }
     *root = NULL;
+    listLenght = 0;
 }
 
 void addtolist(list** root , addr_struct* addr){
@@ -97,6 +105,7 @@ void addtolist(list** root , addr_struct* addr){
      (*root)->next = NULL;
      
     }
+    listLenght++;
 }
 
 list* removefromlist(list** root, unsigned long addr) {
@@ -108,15 +117,16 @@ list* removefromlist(list** root, unsigned long addr) {
     while (currenT != NULL && currenT->add_str->address != addr) {
         prev = currenT;
         currenT = currenT->next;
+        listLenght--;
     }
 
     if (currenT == NULL) return NULL; 
 
     if (prev == NULL) {
-        
+        listLenght--;
         *root = currenT->next;
     } else {
-        
+        listLenght--;
         prev->next = currenT->next;
     }
 
@@ -180,6 +190,8 @@ void* read_process_memory(struct task_struct* task , unsigned long addr , int si
 
 }
 
+
+
 void searchWholeAddressSpaceInit(search_struct *sr){
 
     struct task_struct *task = getProcessByName(sr->processName);
@@ -202,7 +214,6 @@ void searchWholeAddressSpaceInit(search_struct *sr){
     vma = vma_next(&vmi);
     up_read(&mm->mmap_lock);
     
-
     while(vma){
         addr = vma->vm_start;
         start = vma->vm_start;
@@ -222,7 +233,7 @@ void searchWholeAddressSpaceInit(search_struct *sr){
                 case 'i':
 
                     if(*((int*)(value+i)) == (int)sr->value){
-                                u++;
+                        u++;
                         addr_struct *TA = kmalloc(sizeof(addr_struct),GFP_KERNEL);
                         TA->address = addr+i;
                         TA->value = kmalloc(sr->size , GFP_KERNEL);
@@ -233,7 +244,7 @@ void searchWholeAddressSpaceInit(search_struct *sr){
                     }
                     break;
                 case 'l':
-                
+                    
                     if(*((long*)(value+i)) == (long)sr->value){
                         u++;
                         addr_struct *TA = kmalloc(sizeof(addr_struct),GFP_KERNEL);
@@ -342,6 +353,7 @@ void searchWholeAddressSpaceInit(search_struct *sr){
         up_read(&mm->mmap_lock);
         kfree(value);
     }
+    printk(KERN_INFO "List length %i\n", listLenght);
 
 }
 
@@ -404,6 +416,7 @@ void searchList(search_struct *sr){
 
         curr = tmpC;
     }
+    printk(KERN_INFO "List length %i\n", listLenght);
 }
 
 void writeWholeList(search_struct* sr){
@@ -438,6 +451,55 @@ static long executeInstruction(struct file *file, unsigned int cmd, unsigned lon
     search_struct sr;
     sr.value = kmalloc(256 , GFP_KERNEL);
     int flag = 1;
+
+
+    if(cmd == TRANSFER){
+        
+        list_transfer_struct lts;
+        
+        list* curr = MainListRoot;
+        int count = 0;
+
+        if (copy_from_user(<s, (list_transfer_struct __user *)arg, sizeof(list_transfer_struct))) {
+            printk(KERN_ERR "ERROR copying instructions from user!\n");
+            return -EFAULT;
+        }
+        lts.add_str = kmalloc(sizeof(addr_struct)*1024 , GFP_KERNEL);
+        
+        while(curr && count < 1024){
+
+            lts.add_str[count].address = curr->add_str->address;
+            list* tmp = curr->next;
+            removefromlist(&MainListRoot , curr->add_str->address);
+
+            count++;
+            lts.currentTransfers = count;
+            curr = tmp;
+        }
+
+        lts.transfersLeft = listLenght;
+        printk(KERN_ERR "ll! %i\n",listLenght);
+
+
+
+        if (copy_to_user(arg, <s, sizeof(list_transfer_struct))) {
+            printk(KERN_ERR "ERROR copying struct to user!\n");
+            kfree(lts.add_str);
+            return -EFAULT;
+        }
+        
+        if (copy_to_user(&(((list_transfer_struct *)arg)->add_str), lts.add_str, count * sizeof(addr_struct))) {//WRONG
+            printk(KERN_ERR "ERROR copying address array to user!\n");
+            kfree(lts.add_str);
+            return -EFAULT;
+        }
+        kfree(lts.add_str);
+        return 0;
+        
+
+    }
+
+
 
     if(cmd == WRITE_LIST){
         if (copy_from_user(&sr, (search_struct __user *)arg, sizeof(search_struct))) {
