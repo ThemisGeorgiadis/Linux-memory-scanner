@@ -1,3 +1,11 @@
+/********************************************/
+/*                                          */
+/*    Linux Memory Scanner User Program     */
+/*    @author Themistoklis Georgiadis       */
+/*                                          */
+/********************************************/
+
+
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -14,7 +22,8 @@
 #define INIT_SEARCH _IOR(MAGIC, 3, struct search_struct *)
 #define SEARCH_CONT _IOR(MAGIC, 4, struct search_struct *)
 #define WRITE_LIST _IOR(MAGIC, 5, struct search_struct *)
-#define TRANSFER _IOR(MAGIC, 6, struct list_transfer_struct *)
+#define EXTRACT _IOR(MAGIC, 6, struct list_transfer_struct *)
+#define TRANSFER _IOR(MAGIC, 7, struct list_transfer_struct *)
 #define BYTE 8;
 
 
@@ -24,8 +33,9 @@ typedef struct addr_struct{
 }addr_struct;
 
 typedef struct list_transfer_struct{
-    int transfersLeft , listLenght , currentTransfers;
-    addr_struct* add_str;
+    int transfersLeft , currentTransfers;
+    int size;
+    addr_struct add_str[100];
 }list_transfer_struct;
 
 typedef struct list{
@@ -83,6 +93,7 @@ void handle_sig(int sig){
 }
 
 list *MainListRoot;
+int listLength =0;
 
 
 void emptylist(list** root){
@@ -103,6 +114,7 @@ void emptylist(list** root){
         curr = tmpNext;
     }
     *root = NULL;
+    listLength = 0;
 }
 
 void addtolist(list** root , addr_struct* addr){
@@ -119,10 +131,14 @@ void addtolist(list** root , addr_struct* addr){
      (*root)->next = NULL;
      
     }
+    listLength++;
 }
 
 list* removefromlist(list** root, unsigned long addr) {
-    if (*root == NULL) return NULL;
+    if (*root == NULL){
+        listLength = 0;
+        return NULL;
+    }
 
     list* currenT = *root;
     list* prev = NULL;
@@ -132,7 +148,10 @@ list* removefromlist(list** root, unsigned long addr) {
         currenT = currenT->next;
     }
 
-    if (currenT == NULL) return NULL; 
+    if (currenT == NULL){
+        listLength = 0;
+        return NULL;
+    }
 
     if (prev == NULL) {
         
@@ -141,16 +160,49 @@ list* removefromlist(list** root, unsigned long addr) {
         
         prev->next = currenT->next;
     }
-
+    listLength--;
     free(currenT);
     return *root;
 }
 
-int extractList(){
+int sendListToKernel(){
+    list_transfer_struct *lts = malloc(sizeof(list_transfer_struct));
+    int deviceFile = open(DEVICE_PATH, O_RDWR);
+    if (deviceFile < 0) {
+        printf("Failed to open device file\n");
+        return 0;
+    }
+    lts->size = 4;
+    lts->transfersLeft = listLength;
+    while(listLength > 0){
+        lts->currentTransfers=0;
+        
+        for(int i=0; i<100 && lts->transfersLeft > 0; i++){
+            lts->transfersLeft--;
+            lts->add_str[i].address = MainListRoot->add_str->address;
+            lts->add_str[i].value = MainListRoot->add_str->value;
+            //printf("transfers %i\n",lts->transfersLeft);
+            removefromlist(&MainListRoot,lts->add_str[i].address);
+            lts->currentTransfers++;
+
+        }
+        
+        
+        if (ioctl(deviceFile, TRANSFER, lts) == -1) {
+            printf("ERROR\n");
+            close(deviceFile);
+            return 0;
+        }
+    }
+
+}
+
+int extractList(char type){
 
     list_transfer_struct *lts = malloc(sizeof(list_transfer_struct));
+    if(type == 'i')lts->size = 4;
+    if(type == 'l')lts->size = 8;
     lts->transfersLeft = 1;
-    lts->add_str = malloc(sizeof(addr_struct)*1024);
     int deviceFile = open(DEVICE_PATH, O_RDWR);
     if (deviceFile < 0) {
         printf("Failed to open device file\n");
@@ -159,24 +211,22 @@ int extractList(){
 
     while(lts->transfersLeft > 0){
 
-        if (ioctl(deviceFile, TRANSFER, lts) == -1) {
+        if (ioctl(deviceFile, EXTRACT, lts) == -1) {
             printf("ERROR\n");
             close(deviceFile);
             return 0;
         }
-        printf("transfers left %i , current transfers %i\n",lts->transfersLeft , lts->currentTransfers);
-        if(!(lts->add_str))printf("tsifsa\n");
+        //printf("transfers left %i , current transfers %i\n",lts->transfersLeft , lts->currentTransfers);
         for(int i=0; i<lts->currentTransfers; i++){
 
             addr_struct *TA = malloc(sizeof(addr_struct));
             TA->address = lts->add_str[i].address;
+            TA->value = lts->add_str[i].value;
             addtolist(&MainListRoot,TA);
-            printf("Address %x\n",TA->address);
+            //printf("Address %lx value %i\n",TA->address , (int)TA->value);
             
         }
-        
     }
-    
     
     free(lts);
 
@@ -441,7 +491,7 @@ int writeKernelList(char* name , void* value, char type){
         return 0;
     }
 }
-enum state {CLEAR , INIT_SR , CONT_SR , WRITE_LIST_ALL ,READONCE, WRITEONCE, DEFAULT};
+enum state {CLEAR , INIT_SR , CONT_SR , WRITE_LIST_ALL ,READONCE, WRITEONCE, DEFAULT, PRINTLIST, SEND_TO_KERNEL};
 
 void menu(){
     signal(SIGINT, handle_sig); 
@@ -462,12 +512,30 @@ void menu(){
         system("clear");
         switch(State){
 
+            case SEND_TO_KERNEL:
+                sendListToKernel();
+                State = DEFAULT;
+            break;
+
+            case PRINTLIST:
+                list* curr = MainListRoot;
+                int tempInt;
+                memcpy(&tempInt,&(curr->add_str->value),4);
+                while(curr){
+                    printf("Address: %lx Value %i\n",curr->add_str->address , tempInt );
+                    curr = curr->next;
+                }
+                sleep(3);
+                State = DEFAULT;
+            break;
+
             case CLEAR:
                 emptyList();
                 State = DEFAULT;
             break;
 
             case INIT_SR:
+                emptyList();
                 printf("------------------------------------------------------\n\n");
                 printf("        Enter type and value to search\n");
                 printf("        sytax: (type) (value)\n");
@@ -479,11 +547,12 @@ void menu(){
                     case 'l':scanf(" %ld",&inputLong);Kernel_Init_search(processName, &inputLong , type);break;
                     case 's':scanf(" %s",inputString);Kernel_Init_search(processName, &inputString , type);break;
                 }
-                
                 State = DEFAULT;
+                extractList(type);
             break;
 
             case CONT_SR:
+                sendListToKernel();
                 printf("------------------------------------------------------\n\n");
                 printf("        Enter value to search\n\n");
                 printf("------------------------------------------------------\n");
@@ -493,11 +562,12 @@ void menu(){
                     case 'l':scanf(" %ld",&inputLong);Kernel_Cont_search(processName, &inputLong , type);break;
                     case 's':scanf(" %s",inputString);Kernel_Cont_search(processName, &inputString , type);break;
                 }
-
                 State = DEFAULT;
+                extractList(type);
             break;
 
             case WRITE_LIST_ALL:
+            sendListToKernel();
                 printf("------------------------------------------------------\n\n");
                 printf("        Enter value to Write\n\n");
                 printf("------------------------------------------------------\n");
@@ -507,11 +577,12 @@ void menu(){
                     case 'l':scanf(" %ld",&inputLong);writeKernelList(processName, &inputLong , type);break;
                     case 's':scanf(" %s",inputString);writeKernelList(processName, &inputString , type);break;
                 }
-
                 State = DEFAULT;
+                extractList(type);
             break;
 
             case READONCE:
+                
                 printf("------------------------------------------------------\n\n");
                     printf("        Enter type and address to read\n");
                     printf("        sytax: (type) (value)\n");
@@ -519,17 +590,17 @@ void menu(){
                     printf("------------------------------------------------------\n");
                     scanf(" %c",&type);
                     switch(type){
-                        case 'i':scanf(" %ld",&inputLong);
+                        case 'i':scanf(" %lx",&inputLong);
                             int rtrnInt;
                             readProcessMemory(processName, inputLong ,sizeof(int) ,&rtrnInt);
-                            printf("value %i in hex %x\n",rtrnInt);
+                            printf("value %i in hex %x\n",rtrnInt,rtrnInt);
                             sleep(10);
                         break;
 
-                        case 'l':scanf(" %ld",&inputLong);
+                        case 'l':scanf(" %lx",&inputLong);
                             long rtrnLong;
                             readProcessMemory(processName, inputLong ,sizeof(long) ,&rtrnLong);
-                            printf("value %ld in hex %lx\n",rtrnLong);
+                            printf("value %ld in hex %lx\n",rtrnLong,rtrnLong);
                             sleep(10);
                         break;
                     }
@@ -541,14 +612,14 @@ void menu(){
             case WRITEONCE:
                 printf("------------------------------------------------------\n\n");
                 printf("        Enter type address and value to write\n");
-                printf("        sytax: (type) (value)\n");
+                printf("        sytax: (type) (address) (value)\n");
                 printf("        types: i (int), l (long)\n\n");
                 printf("------------------------------------------------------\n");
                 scanf(" %c",&type);
                 unsigned long address;
                 switch(type){
-                    case 'i':scanf(" %ld %i",&address,&inputInt);writeProcessMemory(processName ,address,sizeof(int) ,&inputInt);break;
-                    case 'l':scanf(" %ld %ld",&address,&inputLong);writeProcessMemory(processName ,address,sizeof(int) ,&inputLong);break;
+                    case 'i':scanf(" %lx %i",&address,&inputInt);writeProcessMemory(processName ,address,sizeof(int) ,&inputInt);break;
+                    case 'l':scanf(" %lx %ld",&address,&inputLong);writeProcessMemory(processName ,address,sizeof(int) ,&inputLong);break;
                 }
                 
                 State = DEFAULT;
@@ -564,8 +635,10 @@ void menu(){
                 printf("    4. Write the addresses in the kernel list\n\n");
                 printf("    5. Read single address\n\n");
                 printf("    6. Write single address\n\n");
+                printf("    7. Print List\n\n");
+                printf("    8. Send List to kernel\n\n");
                 printf("------------------------------------------------------\n");
-                while(!(scanf("%i",&menuSelection) == 1 && menuSelection>0 && menuSelection <7));
+                while(!(scanf("%i",&menuSelection) == 1 && menuSelection>0 && menuSelection <9));
                 switch(menuSelection){
                     case 1: State = CLEAR; break;
                     case 2: State = INIT_SR; break;
@@ -575,6 +648,8 @@ void menu(){
                         break;
                     case 5: State = READONCE; break;
                     case 6: State = WRITEONCE; break;
+                    case 7: State = PRINTLIST; break;
+                    case 8: State = SEND_TO_KERNEL; break;
                 }
             break;
             
