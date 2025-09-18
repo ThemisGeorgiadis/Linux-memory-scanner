@@ -1,8 +1,6 @@
 /********************************************
- *                                          *
  *    Linux Memory Scanner Kernel Module    *
  *    Author: Themistoklis Georgiadis       *
- *                                          *
  ********************************************/
 
 This kernel module attaches to a target process (by name or PID) and
