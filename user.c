@@ -14,28 +14,40 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <pthread.h>
 
 #define DEVICE_PATH "/dev/ReadProcessVAs"
 #define MAGIC 'x'
-#define SINGLE_READWRITE _IOR(MAGIC, 1, struct instructionPkg *)
-#define EMPTY_LIST _IOR(MAGIC, 2, int)
-#define INIT_SEARCH _IOR(MAGIC, 3, struct search_struct *)
-#define SEARCH_CONT _IOR(MAGIC, 4, struct search_struct *)
-#define WRITE_LIST _IOR(MAGIC, 5, struct search_struct *)
-#define EXTRACT _IOR(MAGIC, 6, struct list_transfer_struct *)
-#define TRANSFER _IOR(MAGIC, 7, struct list_transfer_struct *)
+#define SINGLE_READWRITE _IOWR(MAGIC, 1, struct instructionPkg *)
+#define EMPTY_LIST _IOWR(MAGIC, 2, int)
+#define INIT_SEARCH _IOWR(MAGIC, 3, struct search_struct *)
+#define SEARCH_CONT _IOWR(MAGIC, 4, struct search_struct *)
+#define WRITE_LIST _IOWR(MAGIC, 5, struct search_struct *)
+#define EXTRACT _IOWR(MAGIC, 6, struct list_transfer_struct *)
+#define TRANSFER _IOWR(MAGIC, 7, struct list_transfer_struct *)
+#define REFRESH_VAL _IOWR(MAGIC, 8, int)
+#define LOCK_DRIVER _IOWR(MAGIC, 9, int)
+#define UNLOCK_DRIVER _IOWR(MAGIC, 10, int)
 #define BYTE 8;
 
 
 typedef struct addr_struct{
     unsigned long address;
     void* value;
+    char type;
 }addr_struct;
+
+typedef struct transfer_node{
+    unsigned long address;
+    char buffer[256];
+    char type;
+}transfer_node;
 
 typedef struct list_transfer_struct{
     int transfersLeft , currentTransfers;
     int size;
-    addr_struct add_str[100];
+    int callerPid;
+    transfer_node T_node[100];
 }list_transfer_struct;
 
 typedef struct list{
@@ -94,6 +106,39 @@ void handle_sig(int sig){
 
 list *MainListRoot;
 int listLength =0;
+int String_size;
+int PID;
+ 
+
+int lockDriver(){
+    int deviceFile = open(DEVICE_PATH, O_RDWR);
+    if (deviceFile < 0) {
+        printf("Failed to open device file\n");
+        return 0;
+    }
+
+    if (ioctl(deviceFile, LOCK_DRIVER, &PID) == -1) {
+            printf("ERROR\n");
+            close(deviceFile);
+            return 0;
+        }
+
+}
+
+int unlockDriver(){
+    int deviceFile = open(DEVICE_PATH, O_RDWR);
+    if (deviceFile < 0) {
+        printf("Failed to open device file\n");
+        return 0;
+    }
+
+    if (ioctl(deviceFile, UNLOCK_DRIVER, &PID) == -1) {
+            printf("ERROR\n");
+            close(deviceFile);
+            return 0;
+        }
+
+}
 
 
 void emptylist(list** root){
@@ -165,24 +210,43 @@ list* removefromlist(list** root, unsigned long addr) {
     return *root;
 }
 
-int sendListToKernel(){
+int sendListToKernel(char type){
     list_transfer_struct *lts = malloc(sizeof(list_transfer_struct));
+    lts->callerPid = getpid();
     int deviceFile = open(DEVICE_PATH, O_RDWR);
     if (deviceFile < 0) {
         printf("Failed to open device file\n");
         return 0;
     }
-    lts->size = 4;
+    if(type == 'i')lts->size = 4;
+    if(type == 'l')lts->size = 8;
+    if(type == 's')lts->size = String_size;
+
     lts->transfersLeft = listLength;
     while(listLength > 0){
         lts->currentTransfers=0;
         
         for(int i=0; i<100 && lts->transfersLeft > 0; i++){
             lts->transfersLeft--;
-            lts->add_str[i].address = MainListRoot->add_str->address;
-            lts->add_str[i].value = MainListRoot->add_str->value;
+            lts->T_node[i].address = MainListRoot->add_str->address;
+            lts->T_node[i].type = type; 
+
+            switch (type)
+            {
+            case 'i':
+                *(int*)lts->T_node[i].buffer = *(int*)MainListRoot->add_str->value;
+                break;
+            
+            case 'l':
+                *(long*)lts->T_node[i].buffer = *(long*)MainListRoot->add_str->value;
+                break;
+
+            case 's':
+                strcpy(lts->T_node[i].buffer , (char*)MainListRoot->add_str->value);
+                break;
+            }
             //printf("transfers %i\n",lts->transfersLeft);
-            removefromlist(&MainListRoot,lts->add_str[i].address);
+            removefromlist(&MainListRoot,lts->T_node[i].address);
             lts->currentTransfers++;
 
         }
@@ -202,7 +266,9 @@ int extractList(char type){
     list_transfer_struct *lts = malloc(sizeof(list_transfer_struct));
     if(type == 'i')lts->size = 4;
     if(type == 'l')lts->size = 8;
+    if(type == 's')lts->size = String_size;
     lts->transfersLeft = 1;
+    lts->callerPid = getpid();
     int deviceFile = open(DEVICE_PATH, O_RDWR);
     if (deviceFile < 0) {
         printf("Failed to open device file\n");
@@ -220,8 +286,24 @@ int extractList(char type){
         for(int i=0; i<lts->currentTransfers; i++){
 
             addr_struct *TA = malloc(sizeof(addr_struct));
-            TA->address = lts->add_str[i].address;
-            TA->value = lts->add_str[i].value;
+            TA->address = lts->T_node[i].address;
+            TA->value = malloc(lts->size);
+            switch (type)
+            {
+            case 'i':
+                TA->value = malloc(sizeof(int));
+                memcpy(TA->value, lts->T_node[i].buffer, sizeof(int));
+                break;
+            case 'l':
+                TA->value = malloc(sizeof(long));
+                memcpy(TA->value, lts->T_node[i].buffer, sizeof(long));
+                break;
+            case 's':
+                
+                TA->value = malloc(String_size);
+                strcpy((char*)TA->value,(char*)lts->T_node[i].buffer);
+                break;
+            }
             addtolist(&MainListRoot,TA);
             //printf("Address %lx value %i\n",TA->address , (int)TA->value);
             
@@ -309,7 +391,7 @@ int writeProcessMemory(char* targetPname , unsigned long targetVAddr ,int size ,
 }
 
 
-void emptyList(){
+void emptyKernList(){
     int deviceFile = open(DEVICE_PATH, O_RDWR);
     if (deviceFile < 0) {
         printf("Failed to open device file\n");
@@ -351,6 +433,7 @@ int Kernel_Init_search(char* name , void* value , char type){
 
         case 's':
         sr.size = strlen((char*)value) + 1;
+        String_size = sr.size;
         sr.value = malloc(sr.size);
         sr.string[sr.size-1] = '\0';
         strcpy(sr.string , value);
@@ -468,7 +551,7 @@ int writeKernelList(char* name , void* value, char type){
         break;
 
     }
-
+    sr.callerPid = getpid();
     int deviceFile = open(DEVICE_PATH, O_RDWR);
     if (deviceFile < 0) {
         printf("Failed to open device file\n");
@@ -491,7 +574,7 @@ int writeKernelList(char* name , void* value, char type){
         return 0;
     }
 }
-enum state {CLEAR , INIT_SR , CONT_SR , WRITE_LIST_ALL ,READONCE, WRITEONCE, DEFAULT, PRINTLIST, SEND_TO_KERNEL};
+enum state {CLEAR , INIT_SR , CONT_SR , WRITE_LIST_ALL ,READONCE, WRITEONCE, DEFAULT, PRINTLIST, SEND_TO_KERNEL, REFRESH_VALUES,LOCKDR,UNLOCKDR};
 
 void menu(){
     signal(SIGINT, handle_sig); 
@@ -512,30 +595,74 @@ void menu(){
         system("clear");
         switch(State){
 
+            case REFRESH_VALUES:
+                if(MainListRoot){
+                    sendListToKernel(type);
+
+                    int deviceFile = open(DEVICE_PATH, O_RDWR);
+                    if (deviceFile < 0) {
+                        printf("Failed to open device file\n");
+                        return 0;
+                    }
+                    int sz;
+                    switch(type)
+                    {
+                    case 'i':
+                        sz = 4;
+                        break;
+                    case 'l':
+                        sz = 8;
+                        break;
+                    case 's':
+                        sz = String_size;
+                        break;
+                    }
+                    if (ioctl(deviceFile, REFRESH_VAL, &sz) == -1) {
+                        printf("ERROR\n");
+                        close(deviceFile);
+                        return 0;
+                    }
+
+                    extractList(type);
+                    State = DEFAULT;
+                }
+            break;
+
             case SEND_TO_KERNEL:
-                sendListToKernel();
+                sendListToKernel(type);
                 State = DEFAULT;
             break;
 
             case PRINTLIST:
                 list* curr = MainListRoot;
-                int tempInt;
-                memcpy(&tempInt,&(curr->add_str->value),4);
+                
                 while(curr){
-                    printf("Address: %lx Value %i\n",curr->add_str->address , tempInt );
+                    switch(type){
+                        case 'i':
+                        printf("Address: %lx Value %i\n",curr->add_str->address , *(int*)curr->add_str->value );
+                        break;
+                        case 'l':
+                        printf("Address: %lx Value %ld\n",curr->add_str->address , *(long*)curr->add_str->value );
+                        break;
+                        case 's':
+                        printf("Address: %lx Value %s\n",curr->add_str->address , (char*)curr->add_str->value );
+                        break;
+                    }
                     curr = curr->next;
                 }
-                sleep(3);
+                while(getchar());
+
                 State = DEFAULT;
             break;
 
             case CLEAR:
-                emptyList();
+                emptyKernList();
                 State = DEFAULT;
             break;
 
             case INIT_SR:
-                emptyList();
+                emptylist(&MainListRoot);
+                lockDriver();
                 printf("------------------------------------------------------\n\n");
                 printf("        Enter type and value to search\n");
                 printf("        sytax: (type) (value)\n");
@@ -549,10 +676,12 @@ void menu(){
                 }
                 State = DEFAULT;
                 extractList(type);
+                unlockDriver();
             break;
 
             case CONT_SR:
-                sendListToKernel();
+                lockDriver();
+                sendListToKernel(type);
                 printf("------------------------------------------------------\n\n");
                 printf("        Enter value to search\n\n");
                 printf("------------------------------------------------------\n");
@@ -564,10 +693,12 @@ void menu(){
                 }
                 State = DEFAULT;
                 extractList(type);
+                unlockDriver();
             break;
 
             case WRITE_LIST_ALL:
-            sendListToKernel();
+            lockDriver();
+            sendListToKernel(type);
                 printf("------------------------------------------------------\n\n");
                 printf("        Enter value to Write\n\n");
                 printf("------------------------------------------------------\n");
@@ -579,6 +710,7 @@ void menu(){
                 }
                 State = DEFAULT;
                 extractList(type);
+                unlockDriver();
             break;
 
             case READONCE:
@@ -625,31 +757,43 @@ void menu(){
                 State = DEFAULT;
             break;
 
+            case LOCKDR:
+                lockDriver();
+                State = DEFAULT;
+            break;
+
+            case UNLOCKDR:
+                unlockDriver();
+                State = DEFAULT;
+            break;
+
             case DEFAULT:
                 printf("------------------------------------------------------\n\n");
                 printf("           Selected type : %c\n",type);
                 printf("            Select option\n\n");
-                printf("    1. Clear kernel list\n");
-                printf("    2. Initialise kernel search\n");
-                printf("    3. Continue kernel search\n");
-                printf("    4. Write the addresses in the kernel list\n\n");
-                printf("    5. Read single address\n\n");
-                printf("    6. Write single address\n\n");
-                printf("    7. Print List\n\n");
-                printf("    8. Send List to kernel\n\n");
+                //printf("    1. Clear kernel list\n");
+                printf("    1. Initialise kernel search\n\n");
+                printf("    2. Continue kernel search\n\n");
+                printf("    3. Write the addresses in the kernel list\n\n");
+                printf("    4. Read single address\n\n");
+                printf("    5. Write single address\n\n");
+                printf("    6. Print List\n\n");
+                //printf("    8. Send List to kernel\n\n");
                 printf("------------------------------------------------------\n");
-                while(!(scanf("%i",&menuSelection) == 1 && menuSelection>0 && menuSelection <9));
+                while(!(scanf("%i",&menuSelection) == 1 && menuSelection>0 && menuSelection <8));
                 switch(menuSelection){
-                    case 1: State = CLEAR; break;
-                    case 2: State = INIT_SR; break;
-                    case 3: if(type == 'i' || type == 'l' || type == 's')State = CONT_SR;
+                    //case 1: State = CLEAR; break;
+                    case 1: State = INIT_SR; break;
+                    case 2: if(type == 'i' || type == 'l' || type == 's')State = CONT_SR;
                         break;
-                    case 4: if(type == 'i' || type == 'l' || type == 's')State = WRITE_LIST_ALL;
+                    case 3: if(type == 'i' || type == 'l' || type == 's')State = WRITE_LIST_ALL;
                         break;
-                    case 5: State = READONCE; break;
-                    case 6: State = WRITEONCE; break;
-                    case 7: State = PRINTLIST; break;
-                    case 8: State = SEND_TO_KERNEL; break;
+                    case 4: State = READONCE; break;
+                    case 5: State = WRITEONCE; break;
+                    case 6: State = PRINTLIST; break;
+                    case 7: State = REFRESH_VALUES; break;
+                    case 8: State = LOCKDR; break;
+                    case 9: State = UNLOCKDR; break;
                 }
             break;
             
@@ -661,7 +805,9 @@ void menu(){
 
 int main() {
    
-
+    pthread_t RefreshListThread;
+    //pthread_create(&RefreshListThread, NULL, do_something, NULL);
+    PID = getpid();
     menu();
 
 

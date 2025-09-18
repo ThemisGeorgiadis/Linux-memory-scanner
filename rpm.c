@@ -20,91 +20,17 @@
 #include <linux/cdev.h>
 #include <linux/init.h>
 #include <linux/string.h>
+#include <linux/mutex.h>
+#include <linux/delay.h>
 
-
-#define DEVICE_NAME "ReadProcessVAs"
-#define MAGIC 'x'
-#define SINGLE_READWRITE _IOR(MAGIC, 1, struct instructionPkg *)
-#define EMPTY_LIST _IOR(MAGIC, 2, int)
-#define INIT_SEARCH _IOR(MAGIC, 3, struct search_struct *)
-#define SEARCH_CONT _IOR(MAGIC, 4, struct search_struct *)
-#define WRITE_LIST _IOR(MAGIC, 5, struct search_struct *)
-#define EXTRACT _IOR(MAGIC, 6, struct list_transfer_struct *)
-#define TRANSFER _IOR(MAGIC, 7, struct list_transfer_struct *)
-#define BYTE 8
-
-/*
-    Struct that holds an address and a pointer to a value
-
-*/
-typedef struct addr_struct{
-    unsigned long address;
-    void* value;
-}addr_struct;
-/*
-    Struct used to hold data to be transfered to the kernel or extracted to the user
-*/
-typedef struct list_transfer_struct{
-    int transfersLeft , currentTransfers;
-    int size;
-    addr_struct add_str[100];
-}list_transfer_struct;
-
-/*
-    List node holding addr_struct elements
-*/
-typedef struct list{
-    addr_struct *add_str;
-    struct list *next;
-}list;
-
-/*
-    Used for searching
-*/
-typedef struct search_struct{
-    char processName[256];
-    char string[256];
-    void* value;
-    int size;
-    char type;
-    int callerPid;
-    addr_struct addrSt;
-
-    int state; //1 for successful operation and 0 for unsuccessful
-
-}search_struct;
-
-/*
-    Old struct for searching. used for single reads or writes
-*/
-typedef struct instructionPkg{
-    char processName[256];
-    unsigned long vaddr;
-    int size;
-    int callerPid;
-    int read;
-    int write;
-
-    int state; //1 for successful operation and 0 for unsuccessful
-    int TargetPid;
-    void* value;
-} instructionPkg;
+#include "rpm.h"
 
 int major;
 list *MainListRoot;
 int listLenght;
-
-
-//Function Declerations
-void emptylist(list** root);
-void addtolist(list** root , addr_struct* addr);
-list* removefromlist(list** root, unsigned long addr);
-static struct task_struct *getProcessByPid(int pid);
-int write_to_process_memory(struct task_struct *task, unsigned long addr, void *buf, int size);
-void* read_process_memory(struct task_struct* task , unsigned long addr , int size);
-void searchWholeAddressSpaceInit(search_struct *sr);
-void searchList(search_struct *sr);
-void writeWholeList(search_struct* sr);
+char procName[256];
+static DEFINE_MUTEX(mut_lock);
+int Pid_lock=0;
 
 void emptylist(list** root){
     list* curr = *root;
@@ -233,6 +159,7 @@ void* read_process_memory(struct task_struct* task , unsigned long addr , int si
 void searchWholeAddressSpaceInit(search_struct *sr){
 
     struct task_struct *task = getProcessByName(sr->processName);
+    strcpy(procName , sr->processName);
     if(!task){
         printk(KERN_ERR "PROCESS NOT FOUND\n");
         return;
@@ -243,7 +170,7 @@ void searchWholeAddressSpaceInit(search_struct *sr){
     unsigned long end;
     long u=0;
 
-    struct mm_struct *mm = task->mm;
+    struct mm_struct *mm = get_task_mm(task); //task->mm;
     struct vm_area_struct *vma;
     struct vma_iterator vmi ;   
 
@@ -275,9 +202,10 @@ void searchWholeAddressSpaceInit(search_struct *sr){
                         addr_struct *TA = kmalloc(sizeof(addr_struct),GFP_KERNEL);
                         TA->address = addr+i;
                         TA->value = kmalloc(sr->size , GFP_KERNEL);
+                        TA->type = 'i';
                         *((int*)(TA->value)) = *((int*)(value+i));
                         addtolist(&MainListRoot,TA);
-                        printk(KERN_INFO "Address %lx , Value int %i   %ld\n",addr+i, *((int*)(TA->value)) , u);
+                        //printk(KERN_INFO "Address %lx , Value int %i   %ld\n",addr+i, *((int*)(TA->value)) , u);
                         
                     }
                     break;
@@ -288,9 +216,10 @@ void searchWholeAddressSpaceInit(search_struct *sr){
                         addr_struct *TA = kmalloc(sizeof(addr_struct),GFP_KERNEL);
                         TA->address = addr+i;
                         TA->value = kmalloc(sr->size , GFP_KERNEL);
+                        TA->type = 'l';
                         *((long*)(TA->value)) = *((long*)(value+i));
                         addtolist(&MainListRoot,TA);
-                        printk(KERN_INFO "Address %lx , Value long %ld   %ld\n",addr+i, *((long*)(value+i)) , u);
+                        //printk(KERN_INFO "Address %lx , Value long %ld   %ld\n",addr+i, *((long*)(value+i)) , u);
                         
                     }
                     break;
@@ -302,11 +231,13 @@ void searchWholeAddressSpaceInit(search_struct *sr){
                             char tmpChar[256];
                             strncpy(tmpChar,((char*)(value+i)),sr->size-1);
                             tmpChar[sr->size] = '\0';
-                            printk(KERN_INFO "Address %lx , Value string %s   %ld\n", addr+i, tmpChar ,u);
+                            //printk(KERN_INFO "Address %lx , Value string %s   %ld\n", addr+i, tmpChar ,u);
 
                             addr_struct *TA = kmalloc(sizeof(addr_struct),GFP_KERNEL);
                             TA->address = addr+i;
-                            TA->value = kmalloc(sr->size , GFP_KERNEL);
+                            TA->value = kmalloc(sr->size, GFP_KERNEL);
+                            TA->type = 's';
+
                             strcpy((char*)(TA->value) , tmpChar);
                             addtolist(&MainListRoot,TA);
 
@@ -341,9 +272,10 @@ void searchWholeAddressSpaceInit(search_struct *sr){
                         addr_struct *TA = kmalloc(sizeof(addr_struct),GFP_KERNEL);
                         TA->address = addr+i;
                         TA->value = kmalloc(sr->size , GFP_KERNEL);
+                        TA->type = 'i';
                         *((int*)(TA->value)) = *((int*)(value+i));
                         addtolist(&MainListRoot,TA);
-                        printk(KERN_INFO "Address %lx , Value int %i   %ld\n",addr+i, *((int*)(value+i)) , u);
+                        //printk(KERN_INFO "Address %lx , Value int %i   %ld\n",addr+i, *((int*)(value+i)) , u);
                         
                     }
                     break;
@@ -354,9 +286,10 @@ void searchWholeAddressSpaceInit(search_struct *sr){
                         addr_struct *TA = kmalloc(sizeof(addr_struct),GFP_KERNEL);
                         TA->address = addr+i;
                         TA->value = kmalloc(sr->size , GFP_KERNEL);
+                        TA->type = 'l';
                         *((long*)(TA->value)) = *((long*)(value+i));
                         addtolist(&MainListRoot,TA);
-                        printk(KERN_INFO "Address %lx , Value long %i   %ld\n",addr+i, *((long*)(value+i)) , u);
+                        //printk(KERN_INFO "Address %lx , Value long %i   %ld\n",addr+i, *((long*)(value+i)) , u);
                         
                     }
                     break;
@@ -368,11 +301,13 @@ void searchWholeAddressSpaceInit(search_struct *sr){
                             char tmpChar[256];
                             strncpy(tmpChar,((char*)(value+i)),sr->size-1);
                             tmpChar[sr->size] = '\0';
-                            printk(KERN_INFO "Address %lx , Value string %s   %ld\n", addr+i, tmpChar ,u);
+                            //printk(KERN_INFO "Address %lx , Value string %s   %ld\n", addr+i, tmpChar ,u);
 
                             addr_struct *TA = kmalloc(sizeof(addr_struct),GFP_KERNEL);
                             TA->address = addr+i;
                             TA->value = kmalloc(sr->size , GFP_KERNEL);
+                            TA->type = 's';
+
                             strcpy((char*)(TA->value) , tmpChar);
                             addtolist(&MainListRoot,TA);
                         }
@@ -421,7 +356,7 @@ void searchList(search_struct *sr){
                     removefromlist(&MainListRoot , curr->add_str->address);
                 }else{
                     u++;
-                    printk(KERN_INFO "Address %lx , Value int %i   %ld\n",curr->add_str->address, *((int*)(value)) , u);
+                    //printk(KERN_INFO "Address %lx , Value int %i   %ld\n",curr->add_str->address, *((int*)(value)) , u);
                     *((int*)curr->add_str->value) = *((int*)(value));
                     tmpC = curr->next;
                 }
@@ -433,7 +368,7 @@ void searchList(search_struct *sr){
                     removefromlist(&MainListRoot , curr->add_str->address);
                 }else{
                     u++;
-                    printk(KERN_INFO "Address %lx , Value int %ld   %ld\n",curr->add_str->address, *((long*)(value)) , u);
+                    //printk(KERN_INFO "Address %lx , Value int %ld   %ld\n",curr->add_str->address, *((long*)(value)) , u);
                     *((long*)curr->add_str->value) = *((long*)(value));
                     tmpC = curr->next;
                 }
@@ -448,7 +383,8 @@ void searchList(search_struct *sr){
                     removefromlist(&MainListRoot , curr->add_str->address);
                 }else{
                     u++;
-                    printk(KERN_INFO "Address %lx , Value string %s   %ld\n",curr->add_str->address, tmpChar, u);
+                    strcpy((char*)curr->add_str->value,tmpChar);
+                    //printk(KERN_INFO "Address %lx , Value string %s   %ld\n",curr->add_str->address, tmpChar, u);
                     tmpC = curr->next;
                 }
             break;
@@ -475,92 +411,145 @@ void writeWholeList(search_struct* sr){
         switch(sr->type){
             case 'i':
             write_to_process_memory(task, tmpList->add_str->address, &sr->value, sr->size);
+            *(int*)tmpList->add_str->value = (int)sr->value;
             break;
             case 'l':
             write_to_process_memory(task, tmpList->add_str->address, &sr->value, sr->size);
+            *(long*)tmpList->add_str->value = (long)sr->value;
             break;
             case 's':
             write_to_process_memory(task, tmpList->add_str->address, sr->string, sr->size);
+            strncpy((char*)tmpList->add_str->value,sr->string,sr->size-1);
             break;
         }
         tmpList = tmpList->next;
     }
 }
 
-
-static long executeInstruction(struct file *file, unsigned int cmd, unsigned long arg){
-    instructionPkg curInst;
+void refreshList(int size){
+    list* tmpList = MainListRoot;
+    void* value;
+    struct task_struct *task = getProcessByName(procName);
     
-    search_struct sr;
-    sr.value = kmalloc(256 , GFP_KERNEL);
-    int flag = 1;
+    if(!task){
+        printk(KERN_ERR "PROCESS NOT FOUND\n");
+        return;
+    }
+    while(tmpList){
+        value = read_process_memory(task , tmpList->add_str->address , size);
+        switch (tmpList->add_str->type)
+        {
+        case 'i':
+            *(int*)tmpList->add_str->value = *(int*)value;
+            break;
+        
+        case 'l':
+            *(long*)tmpList->add_str->value = *(long*)value;
+            break;
 
-    if(cmd == TRANSFER){
-        list_transfer_struct lts;
+        case 's':
+        strncpy((char*)tmpList->add_str->value , (char*)value , size);
+            break;
+        }
+        tmpList = tmpList->next;
+    }
+}
 
-        if (copy_from_user(&lts, (list_transfer_struct __user *)arg, sizeof(list_transfer_struct))) {
+unsigned long transferInternal(unsigned long arg){
+
+    list_transfer_struct* lts = kmalloc(sizeof(list_transfer_struct),GFP_KERNEL);
+
+        if (copy_from_user(lts, (list_transfer_struct __user *)arg, sizeof(list_transfer_struct))) {
             printk(KERN_ERR "ERROR copying instructions from user!\n");
             return -EFAULT;
         }
         //printk(KERN_INFO "address %lx transfers left %i current transfers %i\n",lts.add_str[0].address , lts.transfersLeft , lts.currentTransfers);
-        for(int i=0; lts.currentTransfers > 0 && i<100;i++){
+        for(int i=0; lts->currentTransfers > 0 && i<100;i++){
             addr_struct* tmpAddr = kmalloc(sizeof(addr_struct),GFP_KERNEL);
-            tmpAddr->address = lts.add_str[i].address;
-            tmpAddr->value = kmalloc(lts.size , GFP_KERNEL);
-            memcpy(tmpAddr->value , &(lts.add_str[i].value) , lts.size);
+            tmpAddr->address = lts->T_node[i].address;
+            tmpAddr->value = kmalloc(lts->size , GFP_KERNEL);
+            tmpAddr->type = lts->T_node[i].type;
+            switch (lts->T_node[i].type)
+            {
+            case 'i':
+                *(int*)tmpAddr->value = *(int*)lts->T_node->buffer;
+                break;
+            
+            case 'l':
+                *(long*)tmpAddr->value = *(long*)lts->T_node->buffer;
+                break;
+
+            case 's':
+                strcpy((char*)tmpAddr->value,(char*)lts->T_node->buffer);
+                break;
+            }
+            
             //printk(KERN_INFO "Adding address %lx %i\n",tmpAddr->address , *((int*)tmpAddr->value));
             addtolist(&MainListRoot,tmpAddr);
-            lts.currentTransfers--;
+            lts->currentTransfers--;
         }
 
-        if (copy_to_user(arg, &lts, sizeof(list_transfer_struct))) {
+        if (copy_to_user(arg, lts, sizeof(list_transfer_struct))) {
             printk(KERN_ERR "ERROR copying struct to user!\n");
             return -EFAULT;
         }
-
-        return 0;
-    }
-
-
-    if(cmd == EXTRACT){
+        kfree(lts);
         
-        list_transfer_struct lts;
+        return 0;
+}
+
+unsigned long extractInternal(unsigned long arg){
+    list_transfer_struct* lts = kmalloc(sizeof(list_transfer_struct),GFP_KERNEL);
         
         list* curr = MainListRoot;
         int count = 0;
 
-        if (copy_from_user(&lts, (list_transfer_struct __user *)arg, sizeof(list_transfer_struct))) {
+        if (copy_from_user(lts, (list_transfer_struct __user *)arg, sizeof(list_transfer_struct))) {
             printk(KERN_ERR "ERROR copying instructions from user!\n");
             return -EFAULT;
         }
         
         while(curr && count < 100){
 
-            lts.add_str[count].address = curr->add_str->address;
-            lts.add_str[count].value = *((int*)curr->add_str->value);
+            lts->T_node[count].address = curr->add_str->address;
+            lts->T_node[count].type = curr->add_str->type;
+            switch (curr->add_str->type)
+            {
+            case 'i':
+                memcpy(lts->T_node[count].buffer, curr->add_str->value, sizeof(int));
+                break;
+            
+            case 'l':
+                memcpy(lts->T_node[count].buffer, curr->add_str->value, sizeof(long));
+                break;
+
+            case 's':
+                strcpy(lts->T_node[count].buffer,(char *)curr->add_str->value);
+                break;
+            }
+            
             list* tmp = curr->next;
             removefromlist(&MainListRoot , curr->add_str->address);
             //printk(KERN_INFO "Extracting address: %lx value %i\n",curr->add_str->address,*((int*)curr->add_str->value));
             count++;
-            lts.currentTransfers = count;
+            lts->currentTransfers = count;
             curr = tmp;
         }
 
-        lts.transfersLeft = listLenght;
+        lts->transfersLeft = listLenght;
 
-        if (copy_to_user(arg, &lts, sizeof(list_transfer_struct))) {
+        if (copy_to_user(arg, lts, sizeof(list_transfer_struct))) {
             printk(KERN_ERR "ERROR copying struct to user!\n");
             return -EFAULT;
         }
+        kfree(lts);
         
         return 0;
         
 
-    }
+}
 
-
-
-    if(cmd == WRITE_LIST){
+unsigned long writelistInternal(search_struct sr , unsigned long arg){
         if (copy_from_user(&sr, (search_struct __user *)arg, sizeof(search_struct))) {
             printk(KERN_ERR "ERROR copying instructions from user!\n");
             return -EFAULT;
@@ -572,11 +561,10 @@ static long executeInstruction(struct file *file, unsigned int cmd, unsigned lon
             
         }
         return 0;
+}
 
-    }
-
-    if(cmd == SEARCH_CONT){
-        if (copy_from_user(&sr, (search_struct __user *)arg, sizeof(search_struct))) {
+unsigned long searchcontInternal(search_struct sr , unsigned long arg){
+    if (copy_from_user(&sr, (search_struct __user *)arg, sizeof(search_struct))) {
             printk(KERN_ERR "ERROR copying instructions from user!\n");
             return -EFAULT;
         }
@@ -589,12 +577,12 @@ static long executeInstruction(struct file *file, unsigned int cmd, unsigned lon
             printk(KERN_ERR "ERROR copying instructions to user!\n");
             
         }
+        
         return 0;
-    }
+}
 
-    if(cmd == INIT_SEARCH){
-       
-        if (copy_from_user(&sr, (search_struct __user *)arg, sizeof(search_struct))) {
+unsigned long initsearchInternal(search_struct sr , unsigned long arg){
+    if (copy_from_user(&sr, (search_struct __user *)arg, sizeof(search_struct))) {
             printk(KERN_ERR "ERROR copying instructions from user!\n");
             return -EFAULT;
         }
@@ -607,12 +595,97 @@ static long executeInstruction(struct file *file, unsigned int cmd, unsigned lon
             printk(KERN_ERR "ERROR copying instructions to user!\n");
             
         }
+        
         return 0;
+
+}
+
+
+static long executeInstruction(struct file *file, unsigned int cmd, unsigned long arg){
+    //mutex_lock(&mut_lock);
+    instructionPkg curInst;
+    
+    search_struct sr;
+    sr.value = kmalloc(256 , GFP_KERNEL);
+    int flag = 1;
+
+    if(cmd == LOCK_DRIVER){
+        int temp=-1;
+        if (copy_from_user(&temp, (search_struct __user *)arg, sizeof(int))) {
+            printk(KERN_ERR "ERROR copying instructions from user!\n");
+            return -EFAULT;
+        }
+        while(Pid_lock){
+            printk(KERN_ERR "lk: %i\n",Pid_lock);
+            msleep(1000);
+        }
+        mutex_lock(&mut_lock);
+        printk(KERN_ERR "Locked pid: %i\n",temp);
+        Pid_lock = temp;
+        mutex_unlock(&mut_lock);
+    }
+
+    if(cmd == UNLOCK_DRIVER){
+        int temp=-1;
+        if (copy_from_user(&temp, (search_struct __user *)arg, sizeof(int))) {
+            printk(KERN_ERR "ERROR copying instructions from user!\n");
+            return -EFAULT;
+        }
+        if (Pid_lock == temp){
+            mutex_lock(&mut_lock);
+            printk(KERN_ERR "UNLocked pid: %i\n",temp);
+            Pid_lock = 0;
+            mutex_unlock(&mut_lock);
+        }
+    }
+
+    if(cmd == REFRESH_VAL){
+        int sz;
+        if (copy_from_user(&sz, (int __user *)arg, sizeof(int))) {
+            printk(KERN_ERR "ERROR copying instructions from user!\n");
+            return -EFAULT;
+        }
+        refreshList(sz);
+
+        
+        return 0;
+    }
+
+    if(cmd == TRANSFER){
+       
+        return transferInternal(arg);
+    }
+
+
+    if(cmd == EXTRACT){
+        
+        return extractInternal(arg);
+        
+    }
+
+    if(cmd == WRITE_LIST){
+        
+        return writelistInternal(sr ,arg);
+
+    }
+
+    if(cmd == SEARCH_CONT){
+
+        return searchcontInternal(sr ,arg);
+
+    }
+
+    if(cmd == INIT_SEARCH){
+
+        initsearchInternal(sr ,arg);
+        //extractInternal(arg);
+        return 0;
+
     }
     
 
     if(cmd == EMPTY_LIST){
-
+        
         int state;
 
         if (copy_from_user(&state, (int __user *)arg, sizeof(int))) {
@@ -628,7 +701,7 @@ static long executeInstruction(struct file *file, unsigned int cmd, unsigned lon
             printk(KERN_ERR "ERROR copying instructions to user!\n");
             
         }
-
+       
         return 0;
     }
 
@@ -682,6 +755,7 @@ static long executeInstruction(struct file *file, unsigned int cmd, unsigned lon
         }
         
         return 0;
+        
         
     }
 
